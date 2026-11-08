@@ -1,6 +1,6 @@
 import esphome.codegen as cg
-from esphome.components import sensor
 import esphome.config_validation as cv
+from esphome.components import sensor
 from esphome.const import (
     DEVICE_CLASS_BATTERY,
     DEVICE_CLASS_DISTANCE,
@@ -68,9 +68,7 @@ SENSORS = {
     ),
 }
 
-CONFIG_SCHEMA = B06_CHILD_SCHEMA.extend(
-    {cv.Optional(key): schema for key, schema in SENSORS.items()}
-)
+CONFIG_SCHEMA = B06_CHILD_SCHEMA.extend({cv.Optional(key): schema for key, schema in SENSORS.items()})
 
 
 async def to_code(config):

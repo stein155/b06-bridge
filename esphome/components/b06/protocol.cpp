@@ -41,7 +41,9 @@ size_t build_light(uint8_t *out, bool on) {
     return build_frame(out, CMD_CONFIG, payload, sizeof(payload));
 }
 
-static uint16_t u16_le(const uint8_t *data) { return data[0] | (data[1] << 8); }
+static uint16_t u16_le(const uint8_t *data) {
+    return data[0] | (data[1] << 8);
+}
 static uint32_t u32_le(const uint8_t *data) {
     return data[0] | (data[1] << 8) | (data[2] << 16) | ((uint32_t) data[3] << 24);
 }
@@ -54,8 +56,7 @@ bool FrameParser::take_challenge(uint8_t out[AUTH_CHALLENGE_LEN]) {
     return true;
 }
 
-bool FrameParser::handle_frame_(BikeState &state, uint8_t cmd, const uint8_t *payload, uint8_t len,
-                                bool &changed) {
+bool FrameParser::handle_frame_(BikeState &state, uint8_t cmd, const uint8_t *payload, uint8_t len, bool &changed) {
     switch (cmd) {
         case CMD_AUTH_START:
             if (len < AUTH_CHALLENGE_LEN)
@@ -77,8 +78,11 @@ bool FrameParser::handle_frame_(BikeState &state, uint8_t cmd, const uint8_t *pa
                     break;
                 state.firmware[j++] = (char) payload[i];
             }
-            state.firmware[j] = '\0';
-            changed |= j > 0;
+            // An empty reply keeps the version that is already known.
+            if (j > 0) {
+                state.firmware[j] = '\0';
+                changed = true;
+            }
             return true;
         }
         case CMD_RIDE:
@@ -108,8 +112,7 @@ bool FrameParser::handle_frame_(BikeState &state, uint8_t cmd, const uint8_t *pa
     }
 }
 
-bool FrameParser::feed(BikeState &state, const uint8_t *data, size_t len, uint32_t &bad_crc,
-                       uint32_t &unhandled) {
+bool FrameParser::feed(BikeState &state, const uint8_t *data, size_t len, uint32_t &bad_crc, uint32_t &unhandled) {
     bool changed = false;
     if (data != nullptr && len > 0) {
         // Overflow means garbage, so start over.
@@ -173,10 +176,9 @@ bool auth_answer(const uint8_t challenge[AUTH_CHALLENGE_LEN], uint8_t answer[16]
     mbedtls_cipher_context_t ctx;
     mbedtls_cipher_init(&ctx);
     size_t out_len = 0;
-    const bool ok = mbedtls_cipher_setup(&ctx, info) == 0 &&
-                    mbedtls_cipher_setkey(&ctx, AUTH_KEY, 128, MBEDTLS_ENCRYPT) == 0 &&
-                    mbedtls_cipher_update(&ctx, block, sizeof(block), answer, &out_len) == 0 &&
-                    out_len == sizeof(block);
+    const bool ok =
+        mbedtls_cipher_setup(&ctx, info) == 0 && mbedtls_cipher_setkey(&ctx, AUTH_KEY, 128, MBEDTLS_ENCRYPT) == 0 &&
+        mbedtls_cipher_update(&ctx, block, sizeof(block), answer, &out_len) == 0 && out_len == sizeof(block);
     mbedtls_cipher_free(&ctx);
     return ok;
 }

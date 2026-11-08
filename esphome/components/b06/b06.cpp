@@ -17,7 +17,7 @@ static constexpr uint32_t SUBSCRIBE_SETTLE_MS = 50;
 static constexpr uint32_t CCCD_CONFIRM_TIMEOUT_MS = 1000;
 // The BIKEGO plus app gives the display 10 s to answer the authentication.
 static constexpr uint32_t AUTH_TIMEOUT_MS = 10000;
-// One frame in flight at a time.
+// Writes are spaced like the app's.
 static constexpr uint32_t TX_SPACING_MS = 150;
 // Reconnect when a connected display goes quiet.
 static constexpr uint32_t DATA_TIMEOUT_MS = 15000;
@@ -115,11 +115,15 @@ bool B06Component::claimed_by_other_(uint64_t address) const {
 }
 
 bool B06Component::parse_device(const espbt::ESPBTDevice &device) {
-    if (this->resting_address_ != 0 && device.address_uint64() == this->resting_address_) {
-        this->resting_seen_ms_ = millis();
+    // A resting block only watches its own display; it takes no other until
+    // that one has left, so no display stays connected without a time limit.
+    if (this->resting_address_ != 0) {
+        if (device.address_uint64() == this->resting_address_)
+            this->resting_seen_ms_ = millis();
         return false;
     }
-    if (this->state() != espbt::ClientState::IDLE || !this->matches_(device) ||
+    // Before the GATT client is registered, connect() would only be rejected.
+    if (this->gattc_if_ == ESP_GATT_IF_NONE || this->state() != espbt::ClientState::IDLE || !this->matches_(device) ||
         this->claimed_by_other_(device.address_uint64()))
         return false;
 
@@ -140,6 +144,7 @@ void B06Component::set_state(espbt::ClientState state) {
 
 void B06Component::connect() {
     this->connect_started_ms_ = millis();
+    this->got_data_ = false;
     // Scanning alongside the setup costs connections.
     bike_scan_v1::pause_unless_needed(this);
     BLEClientBase::connect();
@@ -167,8 +172,8 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
                      (unsigned) (millis() - this->connect_started_ms_));
             bike_scan_v1::pause_unless_needed(this);
             this->phase_ = Phase::HANDSHAKE;
-            this->handshake_step_ = 0;
-            this->next_step_at_ = millis() + SUBSCRIBE_SETTLE_MS;
+            this->auth_sent_ = false;
+            this->step_deadline_ = millis() + SUBSCRIBE_SETTLE_MS;
             // The base class enables notifications by writing this descriptor.
             auto *cccd = this->get_config_descriptor(this->tx_handle_);
             this->cccd_handle_ = cccd != nullptr ? cccd->handle : 0;
@@ -179,14 +184,14 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         }
 
         case ESP_GATTC_WRITE_DESCR_EVT:
-            if (this->cccd_handle_ == 0 || param->write.handle != this->cccd_handle_)
+            if (param->write.handle != this->cccd_handle_)
                 break;
-            if (param->write.status == ESP_GATT_OK) {
-                ESP_LOGD(TAG, "Notifications enabled");
-            } else {
-                ESP_LOGW(TAG, "Enabling notifications failed (status=0x%02X); the display will not send data",
-                         param->write.status);
+            if (param->write.status != ESP_GATT_OK) {
+                ESP_LOGW(TAG, "Enabling notifications failed (status=0x%02X), reconnecting", param->write.status);
+                this->disconnect();
+                break;
             }
+            ESP_LOGD(TAG, "Notifications enabled");
             this->cccd_confirmed_ = true;
             break;
 
@@ -214,10 +219,10 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
             if (stats.unhandled != unhandled_before)
                 ESP_LOGD(TAG, "Received an unknown frame (%u this connection)", (unsigned) stats.unhandled);
             if (changed) {
-                if (this->connect_started_ms_ != 0) {
+                if (!this->got_data_) {
                     ESP_LOGI(TAG, "First data %u ms after connecting",
                              (unsigned) (millis() - this->connect_started_ms_));
-                    this->connect_started_ms_ = 0;
+                    this->got_data_ = true;
                 }
                 this->last_state_dirty_ = true;
                 this->publish_state_();
@@ -248,7 +253,7 @@ void B06Component::on_services_ready_() {
     }
     this->tx_handle_ = tx->handle;
     this->rx_handle_ = rx->handle;
-    const esp_err_t err = esp_ble_gattc_register_for_notify(this->gattc_if_, this->remote_bda_, this->tx_handle_);
+    const esp_err_t err = this->register_for_notify(this->tx_handle_);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "register_for_notify failed: %d", err);
         this->disconnect();
@@ -272,9 +277,9 @@ void B06Component::log_bytes_(const char *what, uint16_t handle, const uint8_t *
 void B06Component::log_summary_() {
     this->last_summary_ = millis();
     const auto &s = this->link_stats_;
-    ESP_LOGI(TAG, "%u requests, %u notifications (%u bytes), %u frames, %u bad CRC, %u unknown",
-             (unsigned) s.requests, (unsigned) s.notifications, (unsigned) s.notification_bytes,
-             (unsigned) this->parser_.frames(), (unsigned) s.bad_crc, (unsigned) s.unhandled);
+    ESP_LOGI(TAG, "%u requests, %u notifications (%u bytes), %u frames, %u bad CRC, %u unknown", (unsigned) s.requests,
+             (unsigned) s.notifications, (unsigned) s.notification_bytes, (unsigned) this->parser_.frames(),
+             (unsigned) s.bad_crc, (unsigned) s.unhandled);
 }
 
 // Lists what the device offers, so a log from an unsupported display shows
@@ -299,13 +304,13 @@ void B06Component::loop() {
         this->run_handshake_(now);
         return;
     }
-    if (this->phase_ != Phase::LISTENING)
+    // Until the close event resets the session, a disconnect is in progress.
+    if (this->phase_ != Phase::LISTENING || !this->connected())
         return;
 
     if (now - this->last_summary_ >= SUMMARY_INTERVAL_MS)
         this->log_summary_();
-    const bool no_data_yet = this->connect_started_ms_ != 0;
-    if (this->max_connection_ms_ != 0 && this->resting_address_ == 0 && !no_data_yet &&
+    if (this->max_connection_ms_ != 0 && this->got_data_ &&
         now - this->listening_started_ms_ >= this->max_connection_ms_) {
         // Keeping the link open keeps the display from switching off.
         ESP_LOGI(TAG, "Read the display for %u s, disconnecting until it leaves",
@@ -324,9 +329,9 @@ void B06Component::loop() {
         this->disconnect();
         return;
     }
-    const uint32_t quiet_since = std::max(this->listening_started_ms_, this->last_rx_ms_);
-    if (now - quiet_since >= (no_data_yet ? FIRST_DATA_TIMEOUT_MS : DATA_TIMEOUT_MS)) {
-        ESP_LOGW(TAG, "No data from the display for %u s, reconnecting", (unsigned) ((now - quiet_since) / 1000));
+    const uint32_t quiet_ms = now - this->last_rx_ms_;
+    if (quiet_ms >= (this->got_data_ ? DATA_TIMEOUT_MS : FIRST_DATA_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "No data from the display for %u s, reconnecting", (unsigned) (quiet_ms / 1000));
         this->disconnect();
         return;
     }
@@ -346,8 +351,8 @@ void B06Component::run_handshake_(uint32_t now) {
         ESP_LOGW(TAG, "Display did not confirm the notification subscription, continuing");
         this->cccd_confirmed_ = true;
     }
-    if (this->handshake_step_ == 0) {
-        if ((int32_t) (now - this->next_step_at_) < 0)
+    if (!this->auth_sent_) {
+        if ((int32_t) (now - this->step_deadline_) < 0)
             return;
         static const uint8_t START[] = {0x01};
         uint8_t frame[sizeof(START) + protocol::OVERHEAD];
@@ -356,12 +361,12 @@ void B06Component::run_handshake_(uint32_t now) {
             this->disconnect();
             return;
         }
-        this->handshake_step_ = 1;
-        this->next_step_at_ = now + AUTH_TIMEOUT_MS;
+        this->auth_sent_ = true;
+        this->step_deadline_ = now + AUTH_TIMEOUT_MS;
         return;
     }
     const auto result = this->parser_.auth_result();
-    if (result == protocol::FrameParser::AuthResult::NONE && (int32_t) (now - this->next_step_at_) < 0)
+    if (result == protocol::FrameParser::AuthResult::NONE && (int32_t) (now - this->step_deadline_) < 0)
         return;
     if (result == protocol::FrameParser::AuthResult::OK) {
         ESP_LOGI(TAG, "Display accepted the authentication");
@@ -391,6 +396,7 @@ void B06Component::handle_auth_() {
 void B06Component::finish_handshake_(uint32_t now) {
     this->phase_ = Phase::LISTENING;
     this->listening_started_ms_ = now;
+    this->last_rx_ms_ = now;
     this->last_summary_ = now;
     this->request_version_();
     ESP_LOGI(TAG, "Listening to the display");
@@ -426,13 +432,11 @@ void B06Component::flush_tx_(uint32_t now) {
     if (this->rx_handle_ == 0 || !this->connected())
         return;
     this->last_tx_ms_ = now;
-    // Write without response like the app; fall back to with-response.
-    esp_err_t err = esp_ble_gattc_write_char(this->gattc_if_, this->conn_id_, this->rx_handle_, frame.len, frame.data,
-                                             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-    if (err != ESP_OK) {
-        err = esp_ble_gattc_write_char(this->gattc_if_, this->conn_id_, this->rx_handle_, frame.len, frame.data,
-                                       ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
-    }
+    // Without response like the app, unless the frame does not fit one packet
+    // (the 22-byte authentication answer at the default MTU of 23).
+    const auto type = frame.len + 3u <= this->mtu_ ? ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP;
+    const esp_err_t err = esp_ble_gattc_write_char(this->gattc_if_, this->conn_id_, this->rx_handle_, frame.len,
+                                                   frame.data, type, ESP_GATT_AUTH_REQ_NONE);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Write failed: %d", err);
         return;
@@ -452,6 +456,7 @@ bool B06Component::set_light(bool on) {
         return false;
     }
     ESP_LOGD(TAG, "Light %s", on ? "on" : "off");
+    this->light_pending_ = true;
     this->light_pending_on_ = on;
     this->light_pending_until_ = millis() + LIGHT_CONFIRM_WINDOW_MS;
     return true;
@@ -472,7 +477,9 @@ void B06Component::reset_session_() {
         global_preferences->sync();  // disconnects are rare; do not wait for the periodic flush
     }
     this->phase_ = Phase::IDLE;
-    this->handshake_step_ = 0;
+    this->auth_sent_ = false;
+    this->got_data_ = false;
+    this->light_pending_ = false;
     this->tx_count_ = 0;
     this->last_rx_ms_ = 0;
     this->version_requests_ = 0;
@@ -531,13 +538,12 @@ void B06Component::publish_state_() {
         this->firmware_version_text_sensor_->publish_state(s.firmware);
     }
     if (this->light_switch_ != nullptr && s.light_valid) {
-        const bool pending = (int32_t) (millis() - this->light_pending_until_) < 0;
+        if (this->light_pending_ &&
+            (s.light_on == this->light_pending_on_ || (int32_t) (millis() - this->light_pending_until_) >= 0))
+            this->light_pending_ = false;
         // Skip stale reports sent before the display applied the last command.
-        if (!pending || s.light_on == this->light_pending_on_) {
-            this->light_pending_until_ = millis();
-            if (this->light_switch_->state != s.light_on)
-                this->light_switch_->publish_state(s.light_on);
-        }
+        if (!this->light_pending_ && this->light_switch_->state != s.light_on)
+            this->light_switch_->publish_state(s.light_on);
     }
 }
 

@@ -1,6 +1,6 @@
 import esphome.codegen as cg
-from esphome.components import text_sensor
 import esphome.config_validation as cv
+from esphome.components import text_sensor
 from esphome.const import ENTITY_CATEGORY_DIAGNOSTIC, ICON_BLUETOOTH
 
 from . import B06_CHILD_SCHEMA, CONF_B06_ID
@@ -18,9 +18,7 @@ TEXT_SENSORS = {
     ),
 }
 
-CONFIG_SCHEMA = B06_CHILD_SCHEMA.extend(
-    {cv.Optional(key): schema for key, schema in TEXT_SENSORS.items()}
-)
+CONFIG_SCHEMA = B06_CHILD_SCHEMA.extend({cv.Optional(key): schema for key, schema in TEXT_SENSORS.items()})
 
 
 async def to_code(config):
