@@ -1,0 +1,43 @@
+name: ESPHome Component
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  protocol-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mbedtls
+        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+
+      - name: Run protocol tests
+        run: tests/run.sh
+
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ESPHome
+        run: pip install esphome==2026.10.0
+
+      - name: Create placeholder secrets
+        run: |
+          cat > esphome/secrets.yaml <<EOF
+          wifi_ssid: "ci"
+          wifi_password: "ci-password"
+          ota_password: "ci"
+          api_encryption_key: "$(openssl rand -base64 32)"
+          EOF
+
+      - name: Compile development configuration
+        run: esphome compile esphome/dev.yaml

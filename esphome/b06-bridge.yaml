@@ -1,0 +1,81 @@
+# One B06 display on its own ESP32. To run it next to other bike components,
+# copy the external_components and b06 blocks into that configuration.
+
+substitutions:
+  name: b06-bridge
+  friendly_name: B06 Bridge
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ap:
+    ssid: B06 Bridge
+
+captive_portal:
+
+improv_serial:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/stein155/b06-bridge
+      ref: main
+      path: esphome/components
+    components: [b06]
+
+esp32_ble_tracker:
+  scan_parameters:
+    # Bikes are often in range only briefly on departure and arrival, so scan
+    # with a high duty cycle while leaving airtime for WiFi.
+    active: true
+    continuous: true
+    interval: 320ms
+    window: 160ms
+
+b06:
+  # The display stays on while connected; let it switch off after a reading.
+  max_connection_time: 30s
+
+sensor:
+  - platform: b06
+    battery:
+      name: Battery
+    speed:
+      name: Speed
+    max_speed:
+      name: Max speed
+    avg_speed:
+      name: Average speed
+    trip_distance:
+      name: Trip distance
+    trip_duration:
+      name: Trip duration
+    odometer:
+      name: Odometer
+
+text_sensor:
+  - platform: b06
+    firmware_version:
+      name: Firmware version
+    ble_status:
+      name: BLE status
+
+switch:
+  - platform: b06
+    light:
+      name: Light

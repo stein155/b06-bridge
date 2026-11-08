@@ -1,0 +1,62 @@
+# Development configuration: the component from this checkout and credentials
+# from secrets.yaml (copy secrets.yaml.example).
+
+esphome:
+  name: b06-bridge-dev
+  friendly_name: B06 Bridge Dev
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [b06]
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    continuous: true
+    interval: 320ms
+    window: 160ms
+
+b06:
+  max_connection_time: 30s
+
+sensor:
+  - platform: b06
+    battery:
+      name: Battery
+    speed:
+      name: Speed
+    odometer:
+      name: Odometer
+
+text_sensor:
+  - platform: b06
+    firmware_version:
+      name: Firmware version
+    ble_status:
+      name: BLE status
+
+switch:
+  - platform: b06
+    light:
+      name: Light
