@@ -70,6 +70,9 @@ sends longer frames than the app decodes (46 bytes for `41`, 99 for `42`); only 
 `brew install mbedtls@3`). Copy `esphome/secrets.yaml.example` to `esphome/secrets.yaml` and compile
 `esphome/dev.yaml` with ESPHome 2026.10.0.
 
+`./lint.sh` runs clang-format, ruff, yamllint and shellcheck, as CI does; install them with
+`pip install -r requirements-lint.txt`, and pass `--fix` to apply the fixes.
+
 ## License
 
 MIT

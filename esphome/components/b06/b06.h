@@ -88,9 +88,11 @@ class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v1
     uint32_t resting_seen_ms_{0};
 
     Phase phase_{Phase::IDLE};
-    uint8_t handshake_step_{0};
-    uint32_t next_step_at_{0};
+    // Settle time after subscribing, then the authentication's deadline.
+    uint32_t step_deadline_{0};
+    bool auth_sent_{false};
     uint32_t connect_started_ms_{0};
+    bool got_data_{false};
     uint32_t listening_started_ms_{0};
     uint32_t last_rx_ms_{0};
     uint32_t last_summary_{0};
@@ -120,9 +122,10 @@ class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v1
     uint8_t tx_count_{0};
     uint32_t last_tx_ms_{0};
     // After a light command, light reports that still show the old state are
-    // ignored until this deadline; the bike applies the change with a delay.
-    uint32_t light_pending_until_{0};
+    // ignored until this deadline; the display applies the change with a delay.
+    bool light_pending_{false};
     bool light_pending_on_{false};
+    uint32_t light_pending_until_{0};
     uint16_t tx_handle_{0};
     uint16_t rx_handle_{0};
 
