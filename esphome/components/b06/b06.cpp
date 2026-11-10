@@ -15,6 +15,9 @@ static const char *const TAG = "b06";
 
 static constexpr uint32_t SUBSCRIBE_SETTLE_MS = 50;
 static constexpr uint32_t CCCD_CONFIRM_TIMEOUT_MS = 1000;
+// The scan is off for every bike while one is being set up, so a setup that
+// hangs is given up after this long.
+static constexpr uint32_t SETUP_TIMEOUT_MS = 20000;
 // The BIKEGO plus app gives the display 10 s to answer the authentication.
 static constexpr uint32_t AUTH_TIMEOUT_MS = 10000;
 // Writes are spaced like the app's.
@@ -159,8 +162,18 @@ void B06Component::connect() {
     // Scanning alongside the setup costs connections: it stays off until the
     // display is listened to or the session resets. An attempt that already
     // failed has reset the session.
-    if (this->state() == espbt::ClientState::CONNECTING)
-        bike_scan_v2::begin_setup(this);
+    if (this->state() != espbt::ClientState::CONNECTING)
+        return;
+    bike_scan_v2::begin_setup(this);
+    // On the scheduler: it has to run whatever state the client hangs in.
+    this->set_timeout("setup", SETUP_TIMEOUT_MS, [this]() {
+        if (this->phase_ == Phase::LISTENING || this->state() == espbt::ClientState::IDLE)
+            return;
+        ESP_LOGW(TAG, "Connection setup took longer than %u s, giving up", (unsigned) (SETUP_TIMEOUT_MS / 1000));
+        // Release the scan now; the disconnect can take a while to complete.
+        bike_scan_v2::end_setup(this);
+        this->disconnect();
+    });
 }
 
 bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
@@ -215,7 +228,6 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         case ESP_GATTC_NOTIFY_EVT: {
             if (param->notify.handle != this->tx_handle_)
                 break;
-            this->last_rx_ms_ = millis();
             auto &stats = this->link_stats_;
             ++stats.notifications;
             stats.notification_bytes += param->notify.value_len;
@@ -223,8 +235,13 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
                              stats.notifications <= DEBUG_LOGGED);
             const uint32_t bad_crc_before = stats.bad_crc;
             const uint32_t unhandled_before = stats.unhandled;
+            const uint32_t frames_before = this->parser_.frames();
             const bool changed = this->parser_.feed(this->state_, param->notify.value, param->notify.value_len,
                                                     stats.bad_crc, stats.unhandled);
+            // Only a frame that passes its CRC check counts as data from the
+            // display for the data watchdog.
+            if (this->parser_.frames() != frames_before)
+                this->last_rx_ms_ = millis();
             this->handle_auth_();
             if (stats.bad_crc != bad_crc_before)
                 ESP_LOGD(TAG, "Frame failed the CRC check (%u this connection)", (unsigned) stats.bad_crc);
@@ -415,6 +432,7 @@ void B06Component::finish_handshake_(uint32_t now) {
     this->update_ble_status_();
     // The setup is over: the scan may run again for bikes still searching.
     // The tracker only looks at the scan after a client state change.
+    this->cancel_timeout("setup");
     bike_scan_v2::end_setup(this);
     this->set_state_internal_(this->state());
 }
@@ -507,6 +525,7 @@ void B06Component::reset_session_() {
     // Last, so the coordinator sees this display searching again: every way
     // out of a setup ends here. A resting display is idle too and keeps the
     // scan running, which is how it is seen to leave.
+    this->cancel_timeout("setup");
     bike_scan_v2::end_setup(this);
 }
 
