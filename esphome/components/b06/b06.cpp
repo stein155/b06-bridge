@@ -15,6 +15,9 @@ static const char *const TAG = "b06";
 
 static constexpr uint32_t SUBSCRIBE_SETTLE_MS = 50;
 static constexpr uint32_t CCCD_CONFIRM_TIMEOUT_MS = 1000;
+// The scan is off for every bike while one is being set up, so a setup that
+// hangs is given up after this long.
+static constexpr uint32_t SETUP_TIMEOUT_MS = 20000;
 // The BIKEGO plus app gives the display 10 s to answer the authentication.
 static constexpr uint32_t AUTH_TIMEOUT_MS = 10000;
 // Writes are spaced like the app's.
@@ -62,7 +65,7 @@ std::vector<B06Component *> B06Component::instances_;
 void B06Component::setup() {
     BLEClientBase::setup();
     instances_.push_back(this);
-    bike_scan_v1::add_user(this);
+    bike_scan_v2::add_user(this);
     this->restore_last_state_();
     this->update_ble_status_();
 }
@@ -88,13 +91,23 @@ void B06Component::dump_config() {
     LOG_SWITCH("  ", "Light", this->light_switch_);
 }
 
-bool B06Component::matches_(const espbt::ESPBTDevice &device) const {
+bool B06Component::matches_(const espbt::ESPBTDevice &device) {
+    const uint64_t address = device.address_uint64();
+    const bool known = std::find(std::begin(this->known_addresses_), std::end(this->known_addresses_), address) !=
+                       std::end(this->known_addresses_);
     for (const auto &name : this->device_names_) {
-        if (contains_ignore_case(device.get_name(), name))
-            return true;
+        if (!contains_ignore_case(device.get_name(), name))
+            continue;
+        if (!known) {
+            this->known_addresses_[this->known_address_next_] = address;
+            this->known_address_next_ = (this->known_address_next_ + 1) % MAX_KNOWN_ADDRESSES;
+        }
+        return true;
     }
-    // The display sometimes omits its name; its service still identifies it.
-    if (!device.get_name().empty())
+    // The display sometimes omits its name. Its service alone would also
+    // match other people's displays and unrelated devices, so only an address
+    // this block matched by name before is taken.
+    if (!device.get_name().empty() || !known)
         return false;
     for (const auto &uuid : device.get_service_uuids()) {
         if (uuid == SERVICE_UUID)
@@ -145,9 +158,22 @@ void B06Component::set_state(espbt::ClientState state) {
 void B06Component::connect() {
     this->connect_started_ms_ = millis();
     this->got_data_ = false;
-    // Scanning alongside the setup costs connections.
-    bike_scan_v1::pause_unless_needed(this);
     BLEClientBase::connect();
+    // Scanning alongside the setup costs connections: it stays off until the
+    // display is listened to or the session resets. An attempt that already
+    // failed has reset the session.
+    if (this->state() != espbt::ClientState::CONNECTING)
+        return;
+    bike_scan_v2::begin_setup(this);
+    // On the scheduler: it has to run whatever state the client hangs in.
+    this->set_timeout("setup", SETUP_TIMEOUT_MS, [this]() {
+        if (this->phase_ == Phase::LISTENING || this->state() == espbt::ClientState::IDLE)
+            return;
+        ESP_LOGW(TAG, "Connection setup took longer than %u s, giving up", (unsigned) (SETUP_TIMEOUT_MS / 1000));
+        // Release the scan now; the disconnect can take a while to complete.
+        bike_scan_v2::end_setup(this);
+        this->disconnect();
+    });
 }
 
 bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
@@ -170,7 +196,6 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
             }
             ESP_LOGD(TAG, "Subscribed %u ms after connecting, starting the authentication",
                      (unsigned) (millis() - this->connect_started_ms_));
-            bike_scan_v1::pause_unless_needed(this);
             this->phase_ = Phase::HANDSHAKE;
             this->auth_sent_ = false;
             this->step_deadline_ = millis() + SUBSCRIBE_SETTLE_MS;
@@ -203,7 +228,6 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         case ESP_GATTC_NOTIFY_EVT: {
             if (param->notify.handle != this->tx_handle_)
                 break;
-            this->last_rx_ms_ = millis();
             auto &stats = this->link_stats_;
             ++stats.notifications;
             stats.notification_bytes += param->notify.value_len;
@@ -211,8 +235,13 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
                              stats.notifications <= DEBUG_LOGGED);
             const uint32_t bad_crc_before = stats.bad_crc;
             const uint32_t unhandled_before = stats.unhandled;
+            const uint32_t frames_before = this->parser_.frames();
             const bool changed = this->parser_.feed(this->state_, param->notify.value, param->notify.value_len,
                                                     stats.bad_crc, stats.unhandled);
+            // Only a frame that passes its CRC check counts as data from the
+            // display for the data watchdog.
+            if (this->parser_.frames() != frames_before)
+                this->last_rx_ms_ = millis();
             this->handle_auth_();
             if (stats.bad_crc != bad_crc_before)
                 ESP_LOGD(TAG, "Frame failed the CRC check (%u this connection)", (unsigned) stats.bad_crc);
@@ -401,6 +430,11 @@ void B06Component::finish_handshake_(uint32_t now) {
     this->request_version_();
     ESP_LOGI(TAG, "Listening to the display");
     this->update_ble_status_();
+    // The setup is over: the scan may run again for bikes still searching.
+    // The tracker only looks at the scan after a client state change.
+    this->cancel_timeout("setup");
+    bike_scan_v2::end_setup(this);
+    this->set_state_internal_(this->state());
 }
 
 void B06Component::request_version_() {
@@ -463,7 +497,6 @@ bool B06Component::set_light(bool on) {
 }
 
 void B06Component::reset_session_() {
-    bike_scan_v1::resume();
     if (this->phase_ != Phase::IDLE)
         this->log_summary_();
     if (this->phase_ == Phase::LISTENING) {
@@ -489,6 +522,11 @@ void B06Component::reset_session_() {
     this->cccd_confirmed_ = false;
     this->link_stats_ = {};
     this->parser_.reset();
+    // Last, so the coordinator sees this display searching again: every way
+    // out of a setup ends here. A resting display is idle too and keeps the
+    // scan running, which is how it is seen to leave.
+    this->cancel_timeout("setup");
+    bike_scan_v2::end_setup(this);
 }
 
 void B06Component::restore_last_state_() {

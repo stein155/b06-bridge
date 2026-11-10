@@ -22,9 +22,9 @@ namespace espbt = esphome::esp32_ble_tracker;
 
 // BLE client for one B06 display. Unlike the stock ble_client it needs no MAC
 // address: it connects to the first advertiser whose name contains one of
-// device_names, or that advertises no name but the display's service, and
-// that no other block holds.
-class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v1::ScanUser {
+// device_names and that no other block holds. A display it found that way is
+// also recognised when it later advertises its service without a name.
+class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v2::ScanUser {
  public:
     void setup() override;
     void loop() override;
@@ -34,6 +34,7 @@ class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v1
                              esp_ble_gattc_cb_param_t *param) override;
     void set_state(espbt::ClientState state) override;
     void connect() override;
+    // Searching or resting; the coordinator does not ask during the setup.
     bool needs_scan() const override { return this->phase_ == Phase::IDLE; }
 
     // Key of this bike's state in flash; the block's id.
@@ -59,7 +60,7 @@ class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v1
  protected:
     enum class Phase : uint8_t { IDLE, HANDSHAKE, LISTENING };
 
-    bool matches_(const espbt::ESPBTDevice &device) const;
+    bool matches_(const espbt::ESPBTDevice &device);
     bool claimed_by_other_(uint64_t address) const;
     void on_services_ready_();
     void log_services_();
@@ -82,6 +83,11 @@ class B06Component : public esp32_ble_client::BLEClientBase, public bike_scan_v1
 
     std::string storage_key_;
     std::vector<std::string> device_names_;
+    // Addresses this block matched by name since boot, the oldest replaced
+    // first; 0 is an empty slot.
+    static constexpr size_t MAX_KNOWN_ADDRESSES = 4;
+    uint64_t known_addresses_[MAX_KNOWN_ADDRESSES]{};
+    uint8_t known_address_next_{0};
     uint32_t max_connection_ms_{0};
     // The bike disconnected after max_connection_time, and when it last advertised.
     uint64_t resting_address_{0};
