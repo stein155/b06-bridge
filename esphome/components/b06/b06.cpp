@@ -62,7 +62,7 @@ std::vector<B06Component *> B06Component::instances_;
 void B06Component::setup() {
     BLEClientBase::setup();
     instances_.push_back(this);
-    bike_scan_v1::add_user(this);
+    bike_scan_v2::add_user(this);
     this->restore_last_state_();
     this->update_ble_status_();
 }
@@ -88,13 +88,23 @@ void B06Component::dump_config() {
     LOG_SWITCH("  ", "Light", this->light_switch_);
 }
 
-bool B06Component::matches_(const espbt::ESPBTDevice &device) const {
+bool B06Component::matches_(const espbt::ESPBTDevice &device) {
+    const uint64_t address = device.address_uint64();
+    const bool known = std::find(std::begin(this->known_addresses_), std::end(this->known_addresses_), address) !=
+                       std::end(this->known_addresses_);
     for (const auto &name : this->device_names_) {
-        if (contains_ignore_case(device.get_name(), name))
-            return true;
+        if (!contains_ignore_case(device.get_name(), name))
+            continue;
+        if (!known) {
+            this->known_addresses_[this->known_address_next_] = address;
+            this->known_address_next_ = (this->known_address_next_ + 1) % MAX_KNOWN_ADDRESSES;
+        }
+        return true;
     }
-    // The display sometimes omits its name; its service still identifies it.
-    if (!device.get_name().empty())
+    // The display sometimes omits its name. Its service alone would also
+    // match other people's displays and unrelated devices, so only an address
+    // this block matched by name before is taken.
+    if (!device.get_name().empty() || !known)
         return false;
     for (const auto &uuid : device.get_service_uuids()) {
         if (uuid == SERVICE_UUID)
@@ -145,9 +155,12 @@ void B06Component::set_state(espbt::ClientState state) {
 void B06Component::connect() {
     this->connect_started_ms_ = millis();
     this->got_data_ = false;
-    // Scanning alongside the setup costs connections.
-    bike_scan_v1::pause_unless_needed(this);
     BLEClientBase::connect();
+    // Scanning alongside the setup costs connections: it stays off until the
+    // display is listened to or the session resets. An attempt that already
+    // failed has reset the session.
+    if (this->state() == espbt::ClientState::CONNECTING)
+        bike_scan_v2::begin_setup(this);
 }
 
 bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
@@ -170,7 +183,6 @@ bool B06Component::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
             }
             ESP_LOGD(TAG, "Subscribed %u ms after connecting, starting the authentication",
                      (unsigned) (millis() - this->connect_started_ms_));
-            bike_scan_v1::pause_unless_needed(this);
             this->phase_ = Phase::HANDSHAKE;
             this->auth_sent_ = false;
             this->step_deadline_ = millis() + SUBSCRIBE_SETTLE_MS;
@@ -401,6 +413,10 @@ void B06Component::finish_handshake_(uint32_t now) {
     this->request_version_();
     ESP_LOGI(TAG, "Listening to the display");
     this->update_ble_status_();
+    // The setup is over: the scan may run again for bikes still searching.
+    // The tracker only looks at the scan after a client state change.
+    bike_scan_v2::end_setup(this);
+    this->set_state_internal_(this->state());
 }
 
 void B06Component::request_version_() {
@@ -463,7 +479,6 @@ bool B06Component::set_light(bool on) {
 }
 
 void B06Component::reset_session_() {
-    bike_scan_v1::resume();
     if (this->phase_ != Phase::IDLE)
         this->log_summary_();
     if (this->phase_ == Phase::LISTENING) {
@@ -489,6 +504,10 @@ void B06Component::reset_session_() {
     this->cccd_confirmed_ = false;
     this->link_stats_ = {};
     this->parser_.reset();
+    // Last, so the coordinator sees this display searching again: every way
+    // out of a setup ends here. A resting display is idle too and keeps the
+    // scan running, which is how it is seen to leave.
+    bike_scan_v2::end_setup(this);
 }
 
 void B06Component::restore_last_state_() {

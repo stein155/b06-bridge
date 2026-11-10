@@ -31,7 +31,8 @@ more displays.
 The component runs on the same ESP32 as other BLE bike components, such as
 [tenways-bridge](https://github.com/stein155/tenways-bridge). Add both `external_components` entries and both
 blocks. `scan_coordinator.h` is shared between them: scanning keeps running as long as any bike of any
-component is still searching, and pauses only once all of them are connected.
+component is still searching. It stops only while a bike is being set up, from connecting until the display is
+listened to, and once all of them are connected.
 
 ## Connection time
 
