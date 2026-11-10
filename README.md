@@ -16,7 +16,7 @@
   <a href="#getting-started"><b>Getting started</b></a> ·
   <a href="#how-it-works"><b>How it works</b></a> ·
   <a href="docs/protocol.md"><b>Protocol</b></a> ·
-  <a href="#development"><b>Development</b></a>
+  <a href="CONTRIBUTING.md"><b>Contribute</b></a>
 </p>
 
 ---
@@ -108,7 +108,8 @@ esphome logs esphome/dev.yaml --device <bridge-ip>
 ```
 
 CI runs the linters and the host tests, and compiles `esphome/dev.yaml` with ESPHome 2026.10.0. Only the
-protocol code has automated tests; the rest is checked on a real display.
+protocol code has automated tests; the rest is checked on a real display. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
