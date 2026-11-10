@@ -44,6 +44,16 @@ the odometer, the trip and the light.
 - **🚲 One bridge. Every bike.** Up to three bikes on one ESP32, which it shares with the
   [other bike bridges](#the-bike-bridges).
 
+## The story
+
+I run a smart home built around Home Assistant, and I like to integrate as many devices as possible into it,
+including devices that do not expose a ready-made integration. It started with my Tenways CGO600, which
+became [Tenways Bridge](https://github.com/stein155/tenways-bridge).
+
+Our cargo bike has a B06 display, so for this project I reverse engineered that display's Bluetooth protocol
+too. When the bike connects on departure or arrival, the bridge reads the latest data and reports it to Home
+Assistant. Both bikes share the same ESP32.
+
 ## What you get
 
 | | |
