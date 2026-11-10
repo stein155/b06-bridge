@@ -46,13 +46,14 @@ the odometer, the trip and the light.
 
 ## The story
 
-I run a smart home built around Home Assistant, and I like to integrate as many devices as possible into it,
-including devices that do not expose a ready-made integration. It started with my Tenways CGO600, which
-became [Tenways Bridge](https://github.com/stein155/tenways-bridge).
+I converted a cargo bike into an e-bike with a Bafang BBS01 mid-drive motor, and the kit came with a B06
+display. My Tenways was already in Home Assistant through
+[Tenways Bridge](https://github.com/stein155/tenways-bridge), and I wanted this one there too. Because why
+not.
 
-Our cargo bike has a B06 display, so for this project I reverse engineered that display's Bluetooth protocol
-too. When the bike connects on departure or arrival, the bridge reads the latest data and reports it to Home
-Assistant. Both bikes share the same ESP32.
+So I reverse engineered the display's Bluetooth protocol and built a second component for the same ESP32.
+When the bike connects on departure or arrival, the bridge reads the latest data and reports it to Home
+Assistant.
 
 ## What you get
 
